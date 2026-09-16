@@ -1,0 +1,589 @@
+---
+title: Manifest Destiny Report
+output: html_document
+author: Trevor Day
+date: today
+toc: true
+---
+
+```{r load_data, include = FALSE}
+
+library(tidyverse)
+library(patchwork)
+library(knitr)
+
+# Basic setup
+setwd("C:/Users/Trevor/Documents/manifest_destiny_the_game/")
+players_alph <- c("Dan", "Eli", "John", "Rohin", "Tim", "Trevor")
+all_regions <- c("Great Lakes", "International", "Mid-Atlantic",
+                 "Mountain/Plains", "New England", "Southeast", "Southwest",
+                 "The Frontier")
+
+set_theme(theme_bw())
+
+# Colors
+status_colors <- c("Success" = "springgreen3",
+                    "Fail" = "firebrick2",
+                    "Abandoned/DNA" = "sienna2",
+                    "Lost state" = "violet",
+                    "Start/Now" = "midnightblue")
+
+all_players <- tibble(player = players_alph)
+
+# Read events from file
+events <- read_rds("events.rds")
+
+events2 <- events %>%
+    mutate(
+        player = list(all_players),
+        .after = team
+    ) %>%
+    select(-arank_last)
+
+current_status <- events2[1, ] %>%
+    mutate(
+
+        date = today(),
+        team = NA,
+
+        action = "Current Game",
+        success = "Start/Now",
+        id = NA,
+        state = NA,
+        region = NA,
+        area_sqmi = NA
+
+    )
+
+events3 <- events2 %>%
+    add_row(current_status, .before = 1) %>%
+    unnest(player)
+
+events4 <- events3 %>%
+    pivot_longer(c(matches("^(a?rank|score|states|regions|area|b)_"),
+                   -area_sqmi, -states_total),
+                 names_to = c("name", "player2"), names_sep = "_") %>%
+    pivot_wider() %>%
+    filter(
+        player == player2
+    ) %>%
+    group_by(player2) %>%
+    mutate(
+
+        state_delta = states - lead(states),
+
+        # These are from the "Game Start" row
+        across(c(states, states_total), ~replace_na(.x, 0)),
+
+        success = case_when(
+                state_delta == -1 ~ "Lost state",
+                action == "Game Start" ~ "Start/Now",
+                TRUE ~ success
+            )
+
+    ) %>%
+    filter(
+
+        # Keep the start/end rows
+        # When a state was captured, keep the individuals that were affected
+        # If an action was a fail, keep only the row for the person who did it
+        action %in% c("Current Game", "Game Start") |
+            (success %in% c("Success", "Lost state") & state_delta != 0) |
+            (success != "Success" & str_detect(team, player))
+
+    ) %>%
+    ungroup() %>%
+    select(-player2)
+
+totals <- events4 %>%
+    ungroup() %>%
+    select(date, states_total) %>%
+    mutate(
+        delta = states_total - lead(states_total)
+    ) %>%
+    group_by(date) %>%
+    filter(
+        delta > 0,
+        states_total == max(states_total)
+    ) %>%
+    rename(
+        states = states_total
+    ) %>%
+    ungroup() %>%
+    add_row(
+        date = as.Date("2026-02-01"),
+        states = 0,
+        .after = nrow(.)
+    )
+
+```
+
+# Introduction
+
+First, we describe some basic statistics about the game so far.
+
+## State acquisition
+
+```{r basic_stats}
+
+states_inplay <- sort(unique(events4$state[events4$success == "Success"]))
+states_attempted <- sort(unique(events4$state))
+
+```
+
+There are 65 total states, 59 in North America now that DC is in play, and six
+in the International Region. So far,
+`r length(states_inplay)` have been captured and `r length(states_attempted)`
+attempted (`r round(100 * length(states_inplay) / length(states_attempted))`%
+of attempted states captured). So far,
+`r round(100 * length(states_inplay) / 65)`% of the total states have been
+captured.
+
+- **Captured**: `r states_inplay`
+- **Attempted, but uncaptured**: `r setdiff(states_attempted, states_inplay)`
+
+```{r states, echo=FALSE}
+
+ggplot(events4, aes(x = date, y = states)) +
+    geom_step(
+        data = totals,
+        linewidth = 2.5
+    ) +
+    geom_step(aes(color = player), linewidth = 2) +
+    geom_point(aes(fill = success), shape = 21, size = 3) +
+    scale_x_date(date_breaks = "month", date_labels = "%b") +
+    scale_y_continuous(sec.axis = dup_axis()) +
+    scale_fill_manual(values = status_colors) +
+    theme(legend.position = "bottom") +
+    labs(x = "Date", y = "Total", title = "States in play", fill = "Status",
+         color = "Player") +
+    guides(fill = guide_legend(nrow = 2, byrow = TRUE))
+
+state_increase <- lm(states ~ date, data = totals)
+states_b <- coef(state_increase)[2]
+
+```
+
+On average, `r round(states_b, 3)` new states were captured each
+day, or `r round(30 * states_b, 1)` per month, with an estimated
+`r round(states_b * 365, 1)` by the end of the game.
+
+## Region acquisition
+
+We need to calculate the number of unique regions in play (out of 8 total).
+The regions that have been captured are:
+
+- `r sort(na.omit(unique(events4$region[events4$success == "Success"])))`
+
+Leaving the following uncaptured regions:
+
+- `r setdiff(all_regions, unique(events4$region[events4$success == "Success"]))`
+
+```{r regions, echo=FALSE}
+
+# On which day was a new region acquired?
+regions_acq <- events4 %>%
+    filter(
+        success %in% c("Success", "Start/Now")
+    ) %>%
+    select(date, action, region) %>%
+    mutate(
+
+        regions_total = map_int(row_number(),
+                            ~length(unique(na.omit(region[.x:length(region)]))))
+    ) %>%
+    distinct() %>%
+    mutate(
+        delta = regions_total - lead(regions_total, default = -1)
+    ) %>%
+    group_by(date) %>%
+    filter(
+        # Account for days where multiple regions were acquired
+        action == "Current Game" |
+            (regions_total == max(regions_total) & delta > 0)
+    ) %>%
+    select(-region) %>%
+    distinct()
+
+regions <- events4 %>%
+    select(date, action, player, regions) %>%
+    group_by(player) %>%
+    mutate(
+        regions = replace_na(regions, 0),
+        delta = regions - lead(regions, default = 0)
+    ) %>%
+    filter(
+        delta != 0 | action %in% c("Game Start", "Current Game")
+    ) %>%
+    group_by(player, date) %>%
+    filter(
+        regions == max(regions)
+    )
+
+ggplot(regions, aes(x = date, y = regions)) +
+    geom_step(
+        data = regions_acq,
+        aes(y = regions_total),
+        linewidth = 2.5
+    ) +
+    geom_step(aes(color = player), linewidth = 2) +
+    scale_x_date(date_breaks = "month", date_labels = "%b") +
+    scale_y_continuous(breaks = 0:8, limits = c(0, 8), sec.axis = dup_axis()) +
+    theme(legend.position = "bottom") +
+    labs(x = "Date", y = "Total", title = "States in play", color = "Player") +
+    guides(fill = guide_legend(nrow = 2, byrow = TRUE))
+
+```
+
+## Total area captured
+
+Now let's calculate the total area on the board.
+
+```{r area, echo=FALSE}
+
+total_area <- 3536343
+
+area_acq <- events %>%
+    filter(
+        success == "Success"
+    ) %>%
+    select(date, state, area_sqmi) %>%
+    group_by(state) %>%
+    filter(
+        # Just get the first time they entered the board
+        date == min(date)
+    ) %>%
+    ungroup() %>%
+    mutate(
+        area_total = map_int(row_number(), ~sum(area_sqmi[.x:length(area_sqmi)]))
+    ) %>%
+    group_by(date) %>%
+    filter(
+        # Account for days where multiple states were acquired
+        area_total == max(area_total)
+    ) %>%
+    select(-state, -area_sqmi) %>%
+    distinct() %>%
+    ungroup() %>%
+    add_row(
+        date = today(),
+        area_total = max(.$area_total),
+        .before = 1
+    ) %>%
+    add_row(
+        date = as.Date("2026-02-01"),
+        area_total = 0
+    )
+
+area_by_player <- events4 %>%
+    select(date, action, success, player, area) %>%
+    group_by(player)  %>%
+    distinct() %>%
+    mutate(
+        area = replace_na(area, 0),
+        delta = area - lead(area, default = 0)
+    ) %>%
+    group_by(player, date) %>%
+    filter(
+        area == max(area)
+    )
+
+
+ggplot(area_by_player, aes(x = date, y = area)) +
+    geom_step(
+        data = area_acq,
+        aes(y = area_total / 1000),
+        linewidth = 2.5
+    ) +
+    geom_step(aes(color = player), linewidth = 2) +
+    geom_point(aes(fill = success), shape = 21, size = 3) +
+    scale_x_date(date_breaks = "month", date_labels = "%b") +
+    scale_y_continuous(
+        sec.axis = sec_axis(~ 100 * . / (total_area / 1000),
+                            name = "% of total"),
+        transform = "sqrt"
+    ) +
+    scale_fill_manual(values = status_colors) +
+    theme(legend.position = "bottom") +
+    labs(x = "Date", y = "Sqrt(Total area [x1,000])",
+        title = "Area in play") +
+    guides(fill = guide_legend(nrow = 2))
+
+```
+
+The above plot's $y$ axis has been square root-transformed to minimize the
+effect of claiming Alaska.
+So far, we have claimed `r options(scipen=999); max(area_acq$area_total)`
+square miles, or `r round(100 *  max(area_acq$area_total) / total_area)`% (of
+the US, the rest of the world is assigned no area).
+
+# Time between actions
+
+One goal we have is to offer a bonus to individuals who do not travel for a
+while. Here we calculate the time between game events.
+
+```{r intervals, echo=FALSE}
+
+interval <- events %>%
+    mutate(
+        interval1 = interval(lead(date), date) / days(1),
+        .after = date
+    ) %>%
+    filter_out(
+        when_any(
+            success == "Lost state",
+            action %in% c("Game Start", "Current Game")
+        )
+    )
+
+interval2 <- events4 %>%
+    group_by(player) %>%
+    mutate(
+        interval2 = interval(lead(date), date) / days(1),
+        .after = date
+    ) %>%
+    filter_out(
+        when_any(
+            success == "Lost state",
+            action %in% c("Game Start", "Current Game")
+        )
+    )
+
+ggplot(interval, aes(x = interval1, fill = as.ordered(format(date, "%m")))) +
+    geom_histogram(binwidth = 1, boundary = 0.5) +
+    scale_x_continuous(breaks = seq(0, max(interval$interval1, na.rm = TRUE),
+                        by = 7)) +
+    labs(x = "Days", y = "Count", title = "Days between actions",
+            fill = "Month") +
+    theme(legend.position = "bottom")
+
+```
+
+The max time
+between all events was `r max(interval$interval1, na.rm = TRUE)` days,
+average: `r round(mean(interval$interval1, na.rm = TRUE), 2)`.
+But the more relevant metric is by player, where the max per-player time between
+events was `r max(interval2$interval2, na.rm = TRUE)` days,
+average: `r round(mean(interval2$interval2, na.rm = TRUE), 2)` days.
+
+```{r intervals2, echo = FALSE}
+
+p1 <- ggplot(interval2, aes(x = interval2,
+                fill = as.ordered(format(date, "%m")))) +
+    geom_histogram(binwidth = 2, boundary = 0.5) +
+    scale_x_continuous(breaks = seq(0, max(interval2$interval2, na.rm = TRUE),
+                        by = 21)) +
+    labs(x = "Days", y = "Count", title = "By player",
+            fill = "Month") +
+    theme(legend.position = "bottom") +
+    facet_wrap(vars(player))
+
+p2 <- ggplot(interval2, aes(x = interval2,
+                fill = as.ordered(format(date, "%m")))) +
+    geom_histogram(binwidth = 2, boundary = 0.5) +
+    scale_x_continuous(breaks = seq(0, max(interval2$interval2, na.rm = TRUE),
+                        by = 14)) +
+    labs(x = "Days", y = "Count", title = "All",
+            fill = "Month") +
+    theme(legend.position = "bottom")
+
+p1 + p2 + plot_layout(widths = c(2, 1), guides = "collect") &
+    theme(legend.position = "bottom")
+
+```
+
+And the percentiles were as follows:
+
+```{r pctile, echo=FALSE}
+
+qs <- tibble(pctile = seq(0, 1, by = 0.1),
+             q1 = quantile(interval2$interval2, probs = seq(0, 1, by = 0.1),
+                            na.rm = TRUE))
+
+qs$q1
+
+```
+
+However, this may be skewed by events that took place on the same day
+(fails, captures + attacks), so we take out events that happened 0 days after
+the previous.
+
+```{r pctile2, echo = FALSE}
+
+qs$q2 <- quantile(interval2$interval2[interval2$interval2 > 0],
+            probs = seq(0, 1, by = 0.1), na.rm = TRUE)
+
+qs$q2
+
+
+```
+
+So if we want drawing a card to be an 90th-percentile action, then that
+should be about `r qs$q1[10]` - `r qs$q2[10]` days. The below plot shows
+how many days pass between actions at each percentile; i.e. if you want a player
+to draw a card between half of all trips, then that should be every
+ `r qs$q2[6]` days. This plot excludes intervals of 0 in the calculation of
+ the cumulative distribution and goes as high as 5 weeks (35 days).
+
+```{r edcdf, echo = FALSE}
+
+ecdf_no0s <- ecdf(interval2$interval2[interval2$interval2 > 0])
+
+smooth_func <- tibble(days = seq(0, 35)) %>%
+    mutate(
+        cd = ecdf_no0s(days)
+    ) %>%
+    filter(
+        days > 0
+    )
+
+ggplot(smooth_func, aes(y = days, x = cd)) +
+    geom_line() +
+    geom_point() +
+    geom_vline(xintercept = c(0.5, 0.9), color = "red") +
+    geom_hline(yintercept = qs$q2[c(6, 10)], color = "red") +
+    scale_x_continuous(breaks = seq(0, 1, by = 0.1), limits = c(NA, NA)) +
+    labs(x = "Cumulative distribution", y = "Days",
+         title = "Cumulative distribution of days between events, per player")
+
+```
+
+# Area bonus
+
+The next question is, is the area bonus ($b$) functioning as a catch-up mechanic,
+or it it only reinforcing the leader? The area bonus multipliers, $b^\prime$,
+as percent of the
+total number of states is as follows, although the last-place player is given
+a  $b^\prime$ of 0 in the actual scoring:
+
+```{r ab, echo = FALSE}
+
+b_prime <- round(0.2 * 0.75^(1:6 - 1), 3)
+b_prime
+
+b6_20states = 20 * 10 * b_prime[6]
+
+```
+
+These numbers are hard to interpret. At 20 states in play, the smallest
+$b^\prime$ ($b^\prime{}_6 = `r b_prime[6]`$) results in a $b$ fairly close to 10
+(21 results in a closer $b$, but 20 is nicer):
+
+$$
+b_6 = `r b6_20states` = 200 \times b^\prime{}_6
+$$
+
+We're going to call $b$ standardized at 20 states $B_{20}$.
+
+```{r ab2, echo = FALSE}
+
+b_prime * 200
+
+```
+
+The below plot shows $B_{20}$ for each game state, colored by date. This is
+because early in the game, the leader might have had one or two states and
+score an outsize bonus. This highlights that most of the large bonuses with
+less than five states came early in the game
+This plot does not replace the last-place player with a
+score of 0. Player states where they had no area are excluded. Each of these
+plots jitters the points to avoid overplotting.
+
+```{r area_bonus, echo=FALSE}
+
+arank <- events4 %>%
+    filter(
+        !(action %in% c("Game Start", "Current Game")),
+        area != 0
+    ) %>%
+    select(date, states_total, player, states, area, arank) %>%
+    mutate(
+
+        b1 = 200 * 0.2 * 0.75^(arank - 1),
+        b2 = if_else(arank == 6, 0, b1)
+
+    )
+
+ggplot(arank, aes(x = states, y = b1)) +
+    geom_jitter(aes(color = date), width = 0.5, height = 0.5) +
+    geom_smooth(method = "lm") +
+    scale_y_continuous(limits = c(0, NA)) +
+    viridis::scale_color_viridis() +
+    theme(legend.position = "bottom")
+
+arank1_lm <- lm(b1 ~ states, data = arank)
+
+```
+
+The $R^2$ for the base model is `r round(summary(arank1_lm)$r.squared, 3)`.
+
+```{r arank_0s, echo = FALSE}
+
+ggplot(arank, aes(x = states, y = b2)) +
+    geom_jitter(aes(color = date), width = 0.5, height = 0.5) +
+    geom_smooth(method = "lm") +
+    viridis::scale_color_viridis() +
+    theme(legend.position = "bottom")
+
+arank2_lm <- lm(b2 ~ states, data = arank)
+
+```
+
+The $R^2$ for the with-0s model is `r round(summary(arank2_lm)$r.squared, 3)`.
+All players --- except Rohin --- held a state (with area) by Feb. 7,
+but that includes Eli, Dan, and
+Tim sharing Utah. By March 7, Dan had captured California, setting him out of
+that group. Eli and Tim wouldn't be differentiated until April 7, so if we
+eliminate events before March 7, we can fit two new models that ignore early
+game weirdness.
+
+```{r arank_models}
+
+arank1_mar7_lm <- lm(b1 ~ states, data = filter(arank, date > "2026-03-07"))
+arank2_mar7_lm <- lm(b2 ~ states, data = filter(arank, date > "2026-03-07"))
+
+```
+
+The $R^2$s for these models (without and with 0-replacement) are
+`r round(summary(arank1_mar7_lm)$r.squared, 3)` and
+`r round(summary(arank2_mar7_lm)$r.squared, 3)`, respectively.
+These high $R^2$ values suggest that the area bonus is mostly just acting as a
+bonus for the leading player.
+
+# Challenges
+
+We set an initial challenge success rate goal of 67%. Naturally, attacks should
+have a higher success $(S)$ rate than that. There is some disagreement on how to
+calculate success. The purpose of the `Abandoned/DNA` $(A)$ success outcome is
+to consider challenges that failed mostly because of out-of-game factors, or
+where a final score could not be calculated.
+
+Therefore we have:
+
+- **Success$_1$**: Successes divided by success, fails $(F)$, and DNAs,
+    $\sigma_1 = S / (S + F + A)$, i.e., real-world success rate.
+- **Success$_2$**: Sucesses divided by successes and fails,
+    $\sigma_2 = S / (S + F)$, i.e. success rate
+    given that you found time for the challenge.
+
+We have also conventionally been calculating each capture/attack as one event;
+regardless of the team size. We can multiply those out, i.e., counting one
+for each player, which we'll call $\sigma^*_x$.
+
+The raw counts (collapsed across attack types) are shown below:
+
+```{r successes, echo=FALSE}
+
+challenges <- events %>%
+    filter_out(
+        success == "Start/Now"
+    ) %>%
+    mutate(
+        action = if_else(str_detect(action, "^Attack"), "Attack", action)
+    )
+
+chall_table <- table(challenges$action, challenges$success)
+
+knitr::kable(addmargins(chall_table))
+
+```

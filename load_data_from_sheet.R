@@ -1,7 +1,10 @@
 library(tidyverse)
 library(googlesheets4)
 
+gs4_auth("trevorkmday1@gmail.com")
 ss <- "1p_zYjtf95LX6VC2XflP6vOm8VUFS80eE53CN-OmdsMM"
+
+setwd("C:/Users/Trevor/Documents/manifest_destiny_the_game/")
 
 players_alph <- c("Dan", "Eli", "John", "Rohin", "Tim", "Trevor")
 
@@ -26,4 +29,16 @@ events <- EL0 %>%
             -score_date) %>%
     filter(
         !is.na(date)
-    )
+    ) %>%
+  mutate(
+    # Strip time-of-day
+    date = as.Date(date)
+  ) %>%
+  add_row(
+    date = ymd("2026/02/01"),
+    action = "Game Start",
+    success = "Start/Now",
+    team = paste(players_alph, collapse = ", ")
+  )
+
+write_rds(events, "events.rds")
